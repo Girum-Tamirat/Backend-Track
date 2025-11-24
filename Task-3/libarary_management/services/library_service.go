@@ -2,6 +2,8 @@ package services
 
 import (
 	"errors"
+	"sync"
+	"time"
 	"library_management/models"
 )
 
@@ -12,11 +14,13 @@ type LibraryManager interface {
 	ReturnBook(bookID int, memberID int) error
 	ListAvailableBooks() []models.Book
 	ListBorrowedBooks(memberID int) []models.Book
+	ReserveBook(bookID int, memberID int) error
 }
 
 type Library struct {
 	Books   map[int]models.Book
 	Members map[int]models.Member
+	mu      sync.Mutex // Protects Books and Members
 }
 
 func NewLibrary() *Library {
@@ -27,11 +31,17 @@ func NewLibrary() *Library {
 }
 
 func (l *Library) AddBook(book models.Book) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	book.Status = "Available"
 	l.Books[book.ID] = book
 }
 
 func (l *Library) RemoveBook(bookID int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if _, exists := l.Books[bookID]; !exists {
 		return errors.New("book not found")
 	}
@@ -40,70 +50,104 @@ func (l *Library) RemoveBook(bookID int) error {
 }
 
 func (l *Library) BorrowBook(bookID int, memberID int) error {
-	book, exists := l.Books[bookID]
-	if !exists {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	book, ok := l.Books[bookID]
+	if !ok {
 		return errors.New("book not found")
 	}
-	if book.Status == "Borrowed" {
-		return errors.New("book already borrowed")
+	if book.Status != "Available" && book.Status != "Reserved" {
+		return errors.New("book not available for borrowing")
 	}
 
-	member, exists := l.Members[memberID]
-	if !exists {
+	member, ok := l.Members[memberID]
+	if !ok {
 		return errors.New("member not found")
 	}
 
 	book.Status = "Borrowed"
-	l.Books[bookID] = book
 	member.BorrowedBooks = append(member.BorrowedBooks, book)
+	l.Books[bookID] = book
 	l.Members[memberID] = member
 	return nil
 }
 
 func (l *Library) ReturnBook(bookID int, memberID int) error {
-	member, exists := l.Members[memberID]
-	if !exists {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	member, ok := l.Members[memberID]
+	if !ok {
 		return errors.New("member not found")
 	}
-
-	book, exists := l.Books[bookID]
-	if !exists {
+	book, ok := l.Books[bookID]
+	if !ok {
 		return errors.New("book not found")
 	}
 
-	found := false
+	// Remove from borrowed list
 	for i, b := range member.BorrowedBooks {
 		if b.ID == bookID {
 			member.BorrowedBooks = append(member.BorrowedBooks[:i], member.BorrowedBooks[i+1:]...)
-			found = true
 			break
 		}
 	}
 
-	if !found {
-		return errors.New("book not borrowed by this member")
-	}
-
 	book.Status = "Available"
-	l.Books[bookID] = book
 	l.Members[memberID] = member
+	l.Books[bookID] = book
 	return nil
 }
 
 func (l *Library) ListAvailableBooks() []models.Book {
-	var available []models.Book
-	for _, b := range l.Books {
-		if b.Status == "Available" {
-			available = append(available, b)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	available := []models.Book{}
+	for _, book := range l.Books {
+		if book.Status == "Available" {
+			available = append(available, book)
 		}
 	}
 	return available
 }
 
 func (l *Library) ListBorrowedBooks(memberID int) []models.Book {
-	member, exists := l.Members[memberID]
-	if !exists {
-		return nil
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if member, ok := l.Members[memberID]; ok {
+		return member.BorrowedBooks
 	}
-	return member.BorrowedBooks
+	return nil
+}
+
+// ReserveBook handles concurrent reservation logic
+func (l *Library) ReserveBook(bookID int, memberID int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	book, exists := l.Books[bookID]
+	if !exists {
+		return errors.New("book not found")
+	}
+	if book.Status != "Available" {
+		return errors.New("book already borrowed or reserved")
+	}
+
+	book.Status = "Reserved"
+	l.Books[bookID] = book
+	go func() {
+		time.Sleep(5 * time.Second)
+		l.mu.Lock()
+		defer l.mu.Unlock()
+
+		if l.Books[bookID].Status == "Reserved" {
+			book := l.Books[bookID]
+			book.Status = "Available"
+			l.Books[bookID] = book
+		}
+	}()
+	return nil
 }
