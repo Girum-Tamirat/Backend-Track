@@ -1,10 +1,11 @@
 package models
 
-// Task represents a task item.
+import "go.mongodb.org/mongo-driver/bson/primitive"
+
 type Task struct {
-	ID          int    `json:"id"`
-	Title       string `json:"title" binding:"required"`
-	Description string `json:"description,omitempty"`
-	DueDate     string `json:"due_date,omitempty"`
-	Status      string `json:"status" binding:"required"` // e.g., "pending", "in-progress", "done"
+    ID          primitive.ObjectID `json:"id" bson:"_id,omitempty"`
+    Title       string             `json:"title" bson:"title" binding:"required"`
+    Description string             `json:"description" bson:"description,omitempty"`
+    DueDate     string             `json:"due_date" bson:"due_date,omitempty"`
+    Status      string             `json:"status" bson:"status" binding:"required"`
 }

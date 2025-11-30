@@ -6,14 +6,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SetupRouter initializes Gin and registers routes
-func SetupRouter() *gin.Engine {
+func SetupRoutes(controller *controllers.TaskController) *gin.Engine {
 	r := gin.Default()
 
-	// API v1 group
-	api := r.Group("/api/v1")
-	taskCtrl := controllers.NewTaskController()
-	taskCtrl.RegisterRoutes(api)
+	api := r.Group("/api/v1/tasks")
+	{
+		// /api/v1/tasks
+		api.GET("/", controller.GetAll) 
+		api.POST("/", controller.Create)
+		// /api/v1/tasks/:id
+		api.GET("/:id", controller.GetByID)
+		api.PUT("/:id", controller.Update)
+		api.DELETE("/:id", controller.Delete)
+	}
 
 	return r
 }
