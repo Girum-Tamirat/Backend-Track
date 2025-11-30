@@ -8,116 +8,121 @@ import (
 	"task_manager/models"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type TaskService struct {
-	Collection *mongo.Collection
+	client *mongo.Client
+	coll   *mongo.Collection
+	timeout time.Duration
 }
 
-func NewTaskService() (*TaskService, error) {
+var taskSvc *TaskService
 
-	// Note: For production, use environment variables for URI and handle connection pooling
-	client, err := mongo.NewClient(options.Client().ApplyURI("mongodb://localhost:27017"))
-	if err != nil {
-		return nil, err
+func InitTaskService(uri, dbName string) error {
+	if uri == "" {
+		uri = "mongodb://localhost:27017"
 	}
-
+	if dbName == "" {
+		dbName = "taskdb"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	err = client.Connect(ctx)
+	clientOpts := options.Client().ApplyURI(uri)
+	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	
-	// Ping to confirm connection
 	if err := client.Ping(ctx, nil); err != nil {
-		return nil, errors.New("failed to ping MongoDB: " + err.Error())
+		return err
 	}
-
-	db := client.Database("taskdb")
-	collection := db.Collection("tasks")
-
-	return &TaskService{Collection: collection}, nil
+	coll := client.Database(dbName).Collection("tasks")
+	taskSvc = &TaskService{client: client, coll: coll, timeout: 5 * time.Second}
+	// index for status/title if needed (optional)
+	_, _ = coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{Keys: bson.D{{Key: "title", Value: 1}}})
+	return nil
 }
 
-func (s *TaskService) Create(task models.Task) (*mongo.InsertOneResult, error) {
-	ctx := context.Background()
-	return s.Collection.InsertOne(ctx, task)
+func GetTaskService() *TaskService {
+	return taskSvc
 }
 
-func (s *TaskService) GetAll() ([]models.Task, error) {
-	ctx := context.Background()
-	cursor, err := s.Collection.Find(ctx, bson.M{})
+func (s *TaskService) Close() error {
+	if s.client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.client.Disconnect(ctx)
+}
+
+func (s *TaskService) CreateTask(t models.Task) (models.Task, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	res, err := s.coll.InsertOne(ctx, t)
+	if err != nil {
+		return models.Task{}, err
+	}
+	// fetch inserted document to return with ID
+	var inserted models.Task
+	if err := s.coll.FindOne(ctx, bson.M{"_id": res.InsertedID}).Decode(&inserted); err != nil {
+		return models.Task{}, err
+	}
+	return inserted, nil
+}
+
+func (s *TaskService) GetAllTasks() ([]models.Task, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	cursor, err := s.coll.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, err
 	}
 	defer cursor.Close(ctx)
-
 	var tasks []models.Task
-	if err = cursor.All(ctx, &tasks); err != nil {
+	if err := cursor.All(ctx, &tasks); err != nil {
 		return nil, err
 	}
 	return tasks, nil
 }
 
-func (s *TaskService) GetByID(id string) (models.Task, error) {
-	ctx := context.Background()
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return models.Task{}, errors.New("invalid task ID format")
-	}
-
+func (s *TaskService) GetTaskByID(filter bson.M) (models.Task, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
 	var task models.Task
-	err = s.Collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&task)
-	if err == mongo.ErrNoDocuments {
-		return models.Task{}, errors.New("task not found")
-	}
-	return task, err
-}
-
-func (s *TaskService) Update(id string, data models.Task) (models.Task, error) {
-	ctx := context.Background()
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return models.Task{}, errors.New("invalid task ID format")
-	}
-
-	// This is the crucial part: using the $set operator
-	update := bson.M{
-		"$set": bson.M{
-			"title":       data.Title,
-			"description": data.Description,
-			"due_date":    data.DueDate,
-			"status":      data.Status,
-		},
-	}
-
-	res, err := s.Collection.UpdateByID(ctx, objID, update)
-	if err != nil {
+	if err := s.coll.FindOne(ctx, filter).Decode(&task); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return models.Task{}, errors.New("task not found")
+		}
 		return models.Task{}, err
 	}
-	if res.MatchedCount == 0 {
-		return models.Task{}, errors.New("task not found")
-	}
-
-	// Retrieve the updated document for response
-	var updatedTask models.Task
-	err = s.Collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&updatedTask)
-	return updatedTask, err
+	return task, nil
 }
 
-func (s *TaskService) Delete(id string) error {
-	ctx := context.Background()
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return errors.New("invalid task ID format")
-	}
+// UpdateTask takes the filter (ID) and the fields to update (update)
+func (s *TaskService) UpdateTask(filter bson.M, update bson.M) (models.Task, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
 
-	res, err := s.Collection.DeleteOne(ctx, bson.M{"_id": objID})
+	updateDoc := bson.M{"$set": update}
+
+	// Use FindOneAndUpdate with $set to update fields and return the new document
+	res := s.coll.FindOneAndUpdate(ctx, filter, updateDoc, options.FindOneAndUpdate().SetReturnDocument(options.After))
+	var updated models.Task
+	if err := res.Decode(&updated); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return models.Task{}, errors.New("task not found")
+		}
+		return models.Task{}, err
+	}
+	return updated, nil
+}
+
+func (s *TaskService) DeleteTask(filter bson.M) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	res, err := s.coll.DeleteOne(ctx, filter)
 	if err != nil {
 		return err
 	}

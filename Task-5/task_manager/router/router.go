@@ -2,23 +2,35 @@ package router
 
 import (
 	"task_manager/controllers"
+	"task_manager/middleware"
 
 	"github.com/gin-gonic/gin"
 )
 
-func SetupRoutes(controller *controllers.TaskController) *gin.Engine {
+func SetupRouter(ctrl *controllers.Controller) *gin.Engine {
 	r := gin.Default()
 
-	api := r.Group("/api/v1/tasks")
-	{
-		// /api/v1/tasks
-		api.GET("/", controller.GetAll) 
-		api.POST("/", controller.Create)
-		// /api/v1/tasks/:id
-		api.GET("/:id", controller.GetByID)
-		api.PUT("/:id", controller.Update)
-		api.DELETE("/:id", controller.Delete)
-	}
+	// public auth routes
+	r.POST("/register", ctrl.Register)
+	r.POST("/login", ctrl.Login)
+
+	// protected routes
+	protected := r.Group("/")
+	protected.Use(middleware.AuthMiddleware())
+
+	// task routes (authenticated)
+	protected.GET("/tasks", ctrl.GetTasks)
+	protected.GET("/tasks/:id", ctrl.GetTaskByID)
+
+	// admin-only task mutating routes
+	admin := protected.Group("/")
+	admin.Use(middleware.AdminOnly())
+	admin.POST("/tasks", ctrl.CreateTask)
+	admin.PUT("/tasks/:id", ctrl.UpdateTask)
+	admin.DELETE("/tasks/:id", ctrl.DeleteTask)
+
+	// admin promote endpoint
+	admin.POST("/users/:username/promote", ctrl.Promote)
 
 	return r
 }
